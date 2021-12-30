@@ -1,0 +1,15 @@
+name = "flox"
+version = "0.0.0"
+license = "Apache-2.0"
+description = "Implementation of lox following https://craftinginterpreters.com"
+keywords = ["interpreter", "repl", "educational"]
+copyright = "Copyright 2021 S. Ehlert"
+maintainer = ["@awvwgk"]
+author = ["Sebastian Ehlert"]
+
+[dependencies]
+stdlib.git = "https://github.com/fortran-lang/stdlib.git"
+stdlib.branch = "stdlib-fpm"
+
+[dev-dependencies]
+test-drive.git = "https://github.com/fortran-lang/test-drive.git"
