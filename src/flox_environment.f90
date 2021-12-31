@@ -6,7 +6,7 @@ module flox_environment
   implicit none
   private
 
-  public :: lox_object, lox_error, lox_environment
+  public :: lox_object, lox_error, lox_environment, lox_scope
 
   type, abstract :: lox_object
   end type lox_object
@@ -18,6 +18,7 @@ module flox_environment
   type :: lox_entity
     type(lox_token), allocatable :: var
     class(lox_object), allocatable :: obj
+    logical :: frozen = .false.
   end type lox_entity
 
   type :: lox_environment
@@ -30,6 +31,7 @@ module flox_environment
     procedure :: define => define_env
     procedure :: assign => assign_env
     procedure :: get => get_env
+    procedure :: freeze => freeze_env
   end type lox_environment
 
   type :: lox_scope
@@ -40,6 +42,7 @@ module flox_environment
     procedure :: define => define_scope
     procedure :: assign => assign_scope
     procedure :: get => get_scope
+    procedure :: freeze => freeze_scope
   end type lox_scope
 
   interface resize
@@ -129,6 +132,7 @@ contains
 
     call move_alloc(from%var, to%var)
     call move_alloc(from%obj, to%obj)
+    to%frozen = from%frozen
   end subroutine move_entity
 
   !> Move allocation of a scope
@@ -182,19 +186,22 @@ contains
     !> Name of the variable
     type(lox_token), intent(in) :: var
     !> Object identified by the variable
-    class(lox_object), intent(in), optional :: object
+    class(lox_object), allocatable, intent(inout) :: object
 
     integer :: iscope
+    class(lox_object), allocatable :: copy
 
     iscope = self%current
     do
+      if (allocated(object)) copy = object
       associate(scope => self%scopes(iscope))
-        call scope%define(var, object)
+        call scope%define(var, copy)
         iscope = scope%parent
       end associate
-      if (.not.is_error(object)) exit
+      if (.not.is_error(copy)) exit
       if (iscope == 0) exit
     end do
+    call move_alloc(copy, object)
   end subroutine define_env
 
   subroutine define_scope(self, var, object)
@@ -203,7 +210,7 @@ contains
     !> Name of the variable
     type(lox_token), intent(in) :: var
     !> Object identified by the variable
-    class(lox_object), intent(in), optional :: object
+    class(lox_object), allocatable, intent(inout) :: object
 
     type(lox_entity), pointer :: ptr
 
@@ -216,9 +223,13 @@ contains
       self%nobj = self%nobj + 1
       ptr => self%objects(self%nobj)
     end if
+    if (ptr%frozen) then
+      object = lox_error("Cannot redefine frozen symbol '"//var%val//"'")
+      return
+    end if
 
     ptr%var = var
-    if (present(object)) ptr%obj = object
+    if (allocated(object)) ptr%obj = object
   end subroutine define_scope
 
   subroutine assign_env(self, var, object)
@@ -230,19 +241,21 @@ contains
     class(lox_object), allocatable, intent(inout) :: object
 
     integer :: iscope
-    type(lox_error) :: error
+    class(lox_object), allocatable :: copy
 
     if (.not.allocated(self%scopes)) call resize(self%scopes)
 
     iscope = self%current
     do
+      if (allocated(object)) copy = object
       associate(scope => self%scopes(iscope))
-        call scope%assign(var, object)
+        call scope%assign(var, copy)
         iscope = scope%parent
       end associate
-      if (.not.is_error(object)) exit
+      if (.not.is_error(copy)) exit
       if (iscope == 0) exit
     end do
+    call move_alloc(copy, object)
   end subroutine assign_env
 
   subroutine assign_scope(self, var, object)
@@ -259,6 +272,10 @@ contains
     call find(self, var, ptr)
 
     if (associated(ptr)) then
+      if (ptr%frozen) then
+        object = lox_error("Cannot assign to frozen symbol '"//var%val//"'")
+        return
+      end if
       ptr%var = var
       if (allocated(object)) ptr%obj = object
     else
@@ -275,7 +292,6 @@ contains
     class(lox_object), allocatable, intent(out) :: object
 
     integer :: iscope
-    type(lox_error) :: error
 
     if (.not.allocated(self%scopes)) call resize(self%scopes)
 
@@ -310,6 +326,49 @@ contains
     end if
   end subroutine get_scope
 
+  subroutine freeze_env(self, var, object)
+    !> Instance of environment
+    class(lox_environment), target, intent(inout) :: self
+    !> Name of the variable
+    type(lox_token), intent(in) :: var
+    !> Object identified by the variable
+    class(lox_object), allocatable, intent(out) :: object
+
+    integer :: iscope
+
+    if (.not.allocated(self%scopes)) call resize(self%scopes)
+
+    iscope = self%current
+    do
+      associate(scope => self%scopes(iscope))
+        call scope%freeze(var, object)
+        iscope = scope%parent
+      end associate
+      if (.not.is_error(object)) exit
+      if (iscope == 0) exit
+    end do
+  end subroutine freeze_env
+
+  subroutine freeze_scope(self, var, object)
+    !> Instance of environment
+    class(lox_scope), target, intent(inout) :: self
+    !> Name of the variable
+    type(lox_token), intent(in) :: var
+    !> Object identified by the variable
+    class(lox_object), allocatable, intent(out) :: object
+
+    type(lox_entity), pointer :: ptr
+
+    if (.not.allocated(self%objects)) call resize(self%objects)
+    call find(self, var, ptr)
+
+    if (associated(ptr)) then
+      ptr%frozen = .true.
+    else
+      object = lox_error("Undefined variable '"//var%val//"' referenced")
+    end if
+  end subroutine freeze_scope
+
   subroutine find(self, var, ptr)
     !> Instance of environment
     class(lox_scope), target, intent(in) :: self
@@ -332,16 +391,20 @@ contains
   !> Check whether an object is an error
   pure function is_error(object)
     !> Object to check
-    class(lox_object), intent(in) :: object
+    class(lox_object), intent(in), optional :: object
     !> Result of the check
     logical :: is_error
 
-    select type(object)
-    type is(lox_error)
-      is_error = .true.
-    class default
+    if (present(object)) then
+      select type(object)
+      type is(lox_error)
+        is_error = .true.
+      class default
+        is_error = .false.
+      end select
+    else
       is_error = .false.
-    end select
+    end if
   end function is_error
 
 end module flox_environment

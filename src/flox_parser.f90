@@ -4,8 +4,9 @@
 module flox_parser
   use, intrinsic :: iso_fortran_env, only : lox_real => real64
   use flox_diagnostic, only : lox_diagnostic, label_type, level_syntax_error, level_eof_error
-  use flox_ast, only : lox_ast, lox_expr, lox_stmt, lox_block, lox_expr_stmt, lox_print, &
-    & lox_assign, lox_binary, lox_grouping, lox_literal, lox_unary, lox_var
+  use flox_ast, only : lox_ast, lox_stmt, lox_expr, &
+    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, lox_unary, lox_call
   use flox_scanner, only : lox_token, &
     & LEFT_PAREN, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE, &
     & COMMA, DOT, MINUS, PLUS, SEMICOLON, SLASH, STAR, &
@@ -123,10 +124,17 @@ contains
   !> Parses a single statement with the following grammar rule
   !>
   !>    statement       -> expr_statement
-  !>                       | print_statement ;
+  !>                       | for_statement
+  !>                       | if_statement
+  !>                       | while_statement
+  !>                       | print_statement
   !>                       | block_statement ;
   !>    print_statement -> "print" expression ";" ;
   !>    block_statement -> "{" declaration* "}" ;
+  !>    if_statement    -> "if" "(" expression ")" statement ("else" statement)? ;
+  !>    while_statement -> "while" "(" expression ")" statement ;
+  !>    for_statement   -> "for" "(" ( var_decl | expr_stmt | ";" )
+  !>                       expression? ";" expression? ")" statement ;
   subroutine statement(self, tokens, pos, stmt)
     class(lox_parser), intent(inout) :: self
     type(lox_token), intent(in) :: tokens(:)
@@ -135,6 +143,18 @@ contains
 
     if (match(tokens, pos, [IDENTIFIER])) then
       select case(tokens(pos)%val)
+      case("for")
+        call next(tokens, pos)
+        call for_statement(self, tokens, pos, stmt)
+        return
+      case("if")
+        call next(tokens, pos)
+        call if_statement(self, tokens, pos, stmt)
+        return
+      case("while")
+        call next(tokens, pos)
+        call while_statement(self, tokens, pos, stmt)
+        return
       case("print")
         call next(tokens, pos)
         call print_statement(self, tokens, pos, stmt)
@@ -154,6 +174,147 @@ contains
     call expr_statement(self, tokens, pos, stmt)
 
   end subroutine statement
+
+  !> Parses a conditional statement with the following grammar rule
+  !>
+  !>    if_statement    -> "if" "(" expression ")" statement ("else" statement)? ;
+  subroutine if_statement(self, tokens, pos, stmt)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_stmt), allocatable, intent(out) :: stmt
+
+    class(lox_expr), allocatable :: cond
+    class(lox_stmt), allocatable :: then_stmt, else_stmt
+
+    call consume(self, tokens, pos, LEFT_PAREN, "Expect '(' after 'if'")
+    if (self%panic) return
+
+    call expression(self, tokens, pos, cond)
+    if (self%panic) return
+
+    call consume(self, tokens, pos, RIGHT_PAREN, "Expect ')' after condition")
+    if (self%panic) return
+
+    call statement(self, tokens, pos, then_stmt)
+    if (self%panic) return
+
+    if (match(tokens, pos, [IDENTIFIER])) then
+      select case(tokens(pos)%val)
+      case("else")
+        call next(tokens, pos)
+        call statement(self, tokens, pos, else_stmt)
+        if (self%panic) return
+      end select
+    end if
+
+    stmt = lox_if(cond, then_stmt, else_stmt)
+  end subroutine if_statement
+
+  !> Parses a conditional statement with the following grammar rule
+  !>
+  !>    for_statement -> "for" "(" ( var_decl | expr_statment | ";" )
+  !>                     expression? ";" expression? ")" statement ;
+  subroutine for_statement(self, tokens, pos, stmt)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_stmt), allocatable, intent(out) :: stmt
+
+    class(lox_expr), allocatable :: cond, incr
+    class(lox_stmt), allocatable :: init, body
+    integer :: last
+
+    call consume(self, tokens, pos, LEFT_PAREN, "Expect '(' after 'for'")
+    if (self%panic) return
+
+    if (match(tokens, pos, [SEMICOLON])) then
+      call next(tokens, pos)
+    else if (match(tokens, pos, [IDENTIFIER]) .and. tokens(pos)%val == "var") then
+      call next(tokens, pos)
+      call var_decl(self, tokens, pos, init)
+      if (self%panic) return
+    else
+      call expr_statement(self, tokens, pos, init)
+      if (self%panic) return
+    end if
+
+    if (.not.match(tokens, pos, [SEMICOLON])) then
+      call expression(self, tokens, pos, cond)
+      if (self%panic) return
+    else
+      associate(true => lox_token(tokens(pos)%first, 1, IDENTIFIER, "true"))
+        cond = lox_literal(true)
+      end associate
+    end if
+
+    call consume(self, tokens, pos, SEMICOLON, "Expect ';' after loop condition in 'for'")
+    if (self%panic) return
+
+    if (.not.match(tokens, pos, [RIGHT_PAREN])) then
+      call expression(self, tokens, pos, incr)
+      if (self%panic) return
+    end if
+
+    call consume(self, tokens, pos, RIGHT_PAREN, "Expect ')' after loop increment in 'for'")
+    if (self%panic) return
+
+    call statement(self, tokens, pos, body)
+    if (self%panic) return
+
+    if (allocated(incr)) then
+      block
+        class(lox_block), allocatable :: blck
+        class(lox_stmt), allocatable :: incs
+
+        incs = lox_expr_stmt(incr)
+        allocate(blck)
+        call blck%add(body)
+        call blck%add(incs)
+        call move_alloc(blck, body)
+      end block
+    end if
+
+    stmt = lox_while(cond, body)
+
+    if (allocated(init)) then
+      block
+        class(lox_block), allocatable :: blck
+
+        allocate(blck)
+        call blck%add(init)
+        call blck%add(stmt)
+        call move_alloc(blck, stmt)
+      end block
+    end if
+  end subroutine for_statement
+
+  !> Parses a conditional statement with the following grammar rule
+  !>
+  !>    while_statement -> "while" "(" expression ")" statement ;
+  subroutine while_statement(self, tokens, pos, stmt)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_stmt), allocatable, intent(out) :: stmt
+
+    class(lox_expr), allocatable :: cond
+    class(lox_stmt), allocatable :: body
+
+    call consume(self, tokens, pos, LEFT_PAREN, "Expect '(' after 'while'")
+    if (self%panic) return
+
+    call expression(self, tokens, pos, cond)
+    if (self%panic) return
+
+    call consume(self, tokens, pos, RIGHT_PAREN, "Expect ')' after condition")
+    if (self%panic) return
+
+    call statement(self, tokens, pos, body)
+    if (self%panic) return
+
+    stmt = lox_while(cond, body)
+  end subroutine while_statement
 
   !> Parses a block statement with the following grammar rule
   !>
@@ -224,7 +385,7 @@ contains
 
   !> Parse an expression with the following grammar rule
   !>
-  !>    expression -> equality ;
+  !>    expression -> assignment ;
   recursive subroutine expression(self, tokens, pos, expr)
     class(lox_parser), intent(inout) :: self
     type(lox_token), intent(in) :: tokens(:)
@@ -238,7 +399,7 @@ contains
   !> Parse an assignment with the following grammar rule
   !>
   !>    assignment -> IDENTIFIER "=" assignment
-  !>                  | equality ;
+  !>                  | logic_or ;
   recursive subroutine assignment(self, tokens, pos, expr)
     class(lox_parser), intent(inout) :: self
     type(lox_token), intent(in) :: tokens(:)
@@ -248,7 +409,7 @@ contains
     class(lox_expr), allocatable :: left, right
     integer :: last
 
-    call equality(self, tokens, pos, left)
+    call logic_or(self, tokens, pos, left)
     if (self%panic) return
 
     if (match(tokens, pos, [EQUAL])) then
@@ -274,6 +435,62 @@ contains
       call move_alloc(left, expr)
     end if
   end subroutine assignment
+
+  !> Parse a logical or with the following grammar rule
+  !>
+  !>    logic_or -> logic_and ("or" logic_and)* ;
+  recursive subroutine logic_or(self, tokens, pos, expr)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_expr), allocatable :: expr
+
+    class(lox_expr), allocatable :: left, right
+    integer :: last
+
+    call logic_and(self, tokens, pos, left)
+    if (self%panic) return
+
+    do while(match(tokens, pos, [IDENTIFIER]) .and. tokens(pos)%val == "or")
+      last = pos
+      call next(tokens, pos)
+      call logic_and(self, tokens, pos, right)
+      if (self%panic) return
+
+      expr = lox_logical(left, tokens(last), right)
+      call move_alloc(expr, left)
+    end do
+
+    call move_alloc(left, expr)
+  end subroutine logic_or
+
+  !> Parse a logical and with the following grammar rule
+  !>
+  !>    logic_and -> equality ("and" equality)* ;
+  recursive subroutine logic_and(self, tokens, pos, expr)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_expr), allocatable :: expr
+
+    class(lox_expr), allocatable :: left, right
+    integer :: last
+
+    call equality(self, tokens, pos, left)
+    if (self%panic) return
+
+    do while(match(tokens, pos, [IDENTIFIER]) .and. tokens(pos)%val == "and")
+      last = pos
+      call next(tokens, pos)
+      call equality(self, tokens, pos, right)
+      if (self%panic) return
+
+      expr = lox_logical(left, tokens(last), right)
+      call move_alloc(expr, left)
+    end do
+
+    call move_alloc(left, expr)
+  end subroutine logic_and
 
   !> Parse an expression with the following grammar rule
   !>
@@ -385,8 +602,7 @@ contains
 
   !> Parse an expression with the following grammar rule
   !>
-  !>    unary -> ( "!" | "-" ) unary
-  !>             | primary ;
+  !>    unary -> ( "!" | "-" ) unary | fun_call ;
   recursive subroutine unary(self, tokens, pos, expr)
     class(lox_parser), intent(inout) :: self
     type(lox_token), intent(in) :: tokens(:)
@@ -403,10 +619,72 @@ contains
       if (self%panic) return
       expr = lox_unary(tokens(last), right)
     else
-      call primary(self, tokens, pos, expr)
+      call fun_call(self, tokens, pos, expr)
       if (self%panic) return
     end if
   end subroutine unary
+
+  !> Parse an expression with the following grammar rule
+  !>
+  !>     fun_call  -> primary ( "(" arguments? ")" )* ;
+  !>     arguments -> expression ( "," expression )* ;
+  recursive subroutine fun_call(self, tokens, pos, expr)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    class(lox_expr), allocatable, intent(out) :: expr
+
+    class(lox_expr), allocatable :: local
+    integer :: last
+
+    call primary(self, tokens, pos, local)
+    if (self%panic) return
+
+    do while(match(tokens, pos, [LEFT_PAREN]))
+      last = pos
+      call next(tokens, pos)
+      call finish_call(self, tokens, pos, last, local, expr)
+      call move_alloc(expr, local)
+      if (self%panic) return
+    end do
+
+    call move_alloc(local, expr)
+  end subroutine fun_call
+
+  recursive subroutine finish_call(self, tokens, pos, last, callee, expr)
+    class(lox_parser), intent(inout) :: self
+    type(lox_token), intent(in) :: tokens(:)
+    integer, intent(inout) :: pos
+    integer, intent(inout) :: last
+    class(lox_expr), allocatable, intent(inout) :: callee
+    class(lox_expr), allocatable, intent(out) :: expr
+
+    class(lox_call), allocatable :: fcall
+    class(lox_expr), allocatable :: arg
+
+    allocate(fcall)
+    fcall%paren = tokens(last)
+    call move_alloc(callee, fcall%callee)
+
+    if (.not.match(tokens, pos, [RIGHT_PAREN])) then
+      call expression(self, tokens, pos, arg)
+      if (self%panic) return
+      call fcall%add(arg)
+
+      do while(match(tokens, pos, [COMMA]))
+        call next(tokens, pos)
+
+        call expression(self, tokens, pos, arg)
+        if (self%panic) return
+        call fcall%add(arg)
+      end do
+    end if
+
+    call consume(self, tokens, pos, RIGHT_PAREN, "Expect ')' after arguments")
+    if (self%panic) return
+
+    call move_alloc(fcall, expr)
+  end subroutine finish_call
 
   !> Parse an expression with the following grammar rule
   !>

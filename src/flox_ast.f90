@@ -8,28 +8,33 @@ module flox_ast
   private
 
   public :: lox_ast
-  public :: lox_stmt, lox_block, lox_expr_stmt, lox_print, lox_var
-  public :: lox_expr, lox_assign, lox_binary, lox_grouping, lox_literal, lox_unary
+  public :: lox_stmt, lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while
+  public :: lox_expr, lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, &
+    & lox_unary, lox_call
   public :: lox_visitor
 
 
   !> Abstract base class for visitor
   type, abstract :: lox_visitor
   contains
-    generic :: visit => &
-      visit_ast, &
-      visit_assign, visit_binary, visit_grouping, visit_literal, visit_unary, &
-      visit_block, visit_expr_stmt, visit_print, visit_var
+    generic :: visit => visit_ast, &
+      visit_assign, visit_logical, visit_binary, visit_grouping, visit_literal, visit_unary, &
+      visit_call, &
+      visit_block, visit_expr_stmt, visit_print, visit_var, visit_if, visit_while
     procedure(visit_ast), deferred :: visit_ast
     procedure(visit_assign), deferred :: visit_assign
+    procedure(visit_logical), deferred :: visit_logical
     procedure(visit_binary), deferred :: visit_binary
     procedure(visit_grouping), deferred :: visit_grouping
     procedure(visit_literal), deferred :: visit_literal
     procedure(visit_unary), deferred :: visit_unary
+    procedure(visit_call), deferred :: visit_call
     procedure(visit_block), deferred :: visit_block
     procedure(visit_expr_stmt), deferred :: visit_expr_stmt
     procedure(visit_print), deferred :: visit_print
     procedure(visit_var), deferred :: visit_var
+    procedure(visit_if), deferred :: visit_if
+    procedure(visit_while), deferred :: visit_while
   end type lox_visitor
 
   !> Abstract base class for statements
@@ -113,6 +118,30 @@ module flox_ast
     procedure :: backtrace => backtrace_var
   end type lox_var
 
+  !> Representation of a conditional statement
+  type, extends(lox_stmt) :: lox_if
+    !> Expression to evaluate
+    class(lox_expr), allocatable :: condition
+    !> Block to execute if condition is true
+    class(lox_stmt), allocatable :: then_branch
+    !> Block to execute if condition is false
+    class(lox_stmt), allocatable :: else_branch
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_if
+  end type lox_if
+
+  !> Representation of a while loop
+  type, extends(lox_stmt) :: lox_while
+    !> Expression to evaluate
+    class(lox_expr), allocatable :: condition
+    !> Block to execute while condition is true
+    class(lox_stmt), allocatable :: body
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_while
+  end type lox_while
+
   !> Representation of an assignment expression
   type, extends(lox_expr) :: lox_assign
     !> Name of the variable
@@ -125,6 +154,21 @@ module flox_ast
     !> Return location of the operator
     procedure :: backtrace => backtrace_assign
   end type lox_assign
+
+  !> Representation of a logical expression
+  type, extends(lox_expr) :: lox_logical
+    !> Expression of left operand
+    class(lox_expr), allocatable :: left
+    !> Token representing the operator
+    type(lox_token), allocatable :: operator
+    !> Expression of right operand
+    class(lox_expr), allocatable :: right
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_logical
+    !> Return location of the operator
+    procedure :: backtrace => backtrace_logical
+  end type lox_logical
 
   !> Representation of a binary expression
   type, extends(lox_expr) :: lox_binary
@@ -174,6 +218,31 @@ module flox_ast
     procedure :: backtrace => backtrace_unary
   end type lox_unary
 
+  !> Representation of an argument
+  type :: lox_arg_expr
+    !> Arguments to the function
+    class(lox_expr), allocatable :: expr
+  end type lox_arg_expr
+
+  !> Representation of a function call
+  type, extends(lox_expr) :: lox_call
+    !> Name of the function
+    class(lox_expr), allocatable :: callee
+    !> Token for the opening parenthesis
+    type(lox_token), allocatable :: paren
+    !> Number of arguments
+    integer :: narg = 0
+    !> Arguments to the function
+    type(lox_arg_expr), allocatable :: args(:)
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_call
+    !> Return location of the operator
+    procedure :: backtrace => backtrace_call
+    !> Add an argument to the call
+    procedure :: add => add_call
+  end type lox_call
+
   abstract interface
     !> Accept a visitor to an abstract statement
     recursive subroutine accept_stmt(self, visitor)
@@ -203,6 +272,13 @@ module flox_ast
       class(lox_assign), intent(in) :: expr
     end subroutine visit_assign
 
+    !> Visit a logical expression
+    recursive subroutine visit_logical(self, expr)
+      import :: lox_logical, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_logical), intent(in) :: expr
+    end subroutine visit_logical
+
     !> Visit a binary expression
     recursive subroutine visit_binary(self, expr)
       import :: lox_binary, lox_visitor
@@ -231,6 +307,13 @@ module flox_ast
       class(lox_unary), intent(in) :: expr
     end subroutine visit_unary
 
+    !> Visit a function call
+    recursive subroutine visit_call(self, expr)
+      import :: lox_call, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_call), intent(in) :: expr
+    end subroutine visit_call
+
     !> Visit an expression statement
     recursive subroutine visit_block(self, stmt)
       import :: lox_block, lox_visitor
@@ -258,7 +341,31 @@ module flox_ast
       class(lox_visitor), intent(inout) :: self
       class(lox_var), intent(in) :: stmt
     end subroutine visit_var
+
+    !> Visit a conditional statement
+    recursive subroutine visit_if(self, stmt)
+      import :: lox_if, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_if), intent(in) :: stmt
+    end subroutine visit_if
+
+    !> Visit a conditional statement
+    recursive subroutine visit_while(self, stmt)
+      import :: lox_while, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_while), intent(in) :: stmt
+    end subroutine visit_while
   end interface
+
+  interface resize
+    module procedure :: resize_ast_node
+    module procedure :: resize_arg_expr
+  end interface resize
+
+  interface move
+    module procedure :: move_ast_node
+    module procedure :: move_arg_expr
+  end interface move
 
 contains
 
@@ -273,6 +380,12 @@ contains
     class(lox_visitor), intent(inout) :: visitor
     call visitor%visit(self)
   end subroutine accept_assign
+
+  subroutine accept_logical(self, visitor)
+    class(lox_logical), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_logical
 
   subroutine accept_binary(self, visitor)
     class(lox_binary), intent(in) :: self
@@ -298,6 +411,12 @@ contains
     call visitor%visit(self)
   end subroutine accept_unary
 
+  subroutine accept_call(self, visitor)
+    class(lox_call), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_call
+
   subroutine accept_block(self, visitor)
     class(lox_block), intent(in) :: self
     class(lox_visitor), intent(inout) :: visitor
@@ -321,6 +440,18 @@ contains
     class(lox_visitor), intent(inout) :: visitor
     call visitor%visit(self)
   end subroutine accept_var
+
+  subroutine accept_if(self, visitor)
+    class(lox_if), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_if
+
+  subroutine accept_while(self, visitor)
+    class(lox_while), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_while
 
   pure function backtrace_stmt(self) result(token)
     class(lox_stmt), intent(in) :: self
@@ -346,6 +477,13 @@ contains
     token = self%name
   end function backtrace_assign
 
+  pure function backtrace_logical(self) result(token)
+    class(lox_logical), intent(in) :: self
+    type(lox_token), allocatable :: token
+
+    token = self%operator
+  end function backtrace_logical
+
   pure function backtrace_binary(self) result(token)
     class(lox_binary), intent(in) :: self
     type(lox_token), allocatable :: token
@@ -366,6 +504,13 @@ contains
 
     token = self%operator
   end function backtrace_unary
+
+  pure function backtrace_call(self) result(token)
+    class(lox_call), intent(in) :: self
+    type(lox_token), allocatable :: token
+
+    token = self%paren
+  end function backtrace_call
 
   subroutine add_ast(self, stmt)
     class(lox_ast), intent(inout) :: self
@@ -393,8 +538,21 @@ contains
     end associate
   end subroutine add_block
 
+  subroutine add_call(self, expr)
+    class(lox_call), intent(inout) :: self
+    class(lox_expr), allocatable, intent(inout) :: expr
+
+    if (.not.allocated(self%args)) call resize(self%args)
+    if (self%narg >= size(self%args)) call resize(self%args)
+
+    self%narg = self%narg + 1
+    associate(new => self%args(self%narg))
+      call move_alloc(expr, new%expr)
+    end associate
+  end subroutine add_call
+
   !> Reallocate list of AST nodes
-  subroutine resize(list, n)
+  subroutine resize_ast_node(list, n)
     !> Instance of the array to be resized
     type(lox_ast_node), allocatable, intent(inout) :: list(:)
     !> Dimension of the final array size
@@ -424,16 +582,59 @@ contains
       call move(tmp(:this_size), list(:this_size))
       deallocate(tmp)
     end if
-  end subroutine resize
+  end subroutine resize_ast_node
 
   !> Move allocation of an AST node
-  elemental subroutine move(from, to)
+  elemental subroutine move_ast_node(from, to)
     !> Source node to move allocation from
     type(lox_ast_node), intent(inout) :: from
     !> Target node to move allocation to
     type(lox_ast_node), intent(out) :: to
 
     call move_alloc(from%stmt, to%stmt)
-  end subroutine move
+  end subroutine move_ast_node
+
+  !> Reallocate list of argument expressions
+  subroutine resize_arg_expr(list, n)
+    !> Instance of the array to be resized
+    type(lox_arg_expr), allocatable, intent(inout) :: list(:)
+    !> Dimension of the final array size
+    integer, intent(in), optional :: n
+
+    type(lox_arg_expr), allocatable :: tmp(:)
+    integer :: this_size, new_size
+    integer, parameter :: initial_size = 8
+
+    if (allocated(list)) then
+      this_size = size(list, 1)
+      call move_alloc(list, tmp)
+    else
+      this_size = initial_size
+    end if
+
+    if (present(n)) then
+      new_size = n
+    else
+      new_size = this_size + this_size/2 + 1
+    end if
+
+    allocate(list(new_size))
+
+    if (allocated(tmp)) then
+      this_size = min(size(tmp, 1), size(list, 1))
+      call move(tmp(:this_size), list(:this_size))
+      deallocate(tmp)
+    end if
+  end subroutine resize_arg_expr
+
+  !> Move allocation of an argument expression
+  elemental subroutine move_arg_expr(from, to)
+    !> Source node to move allocation from
+    type(lox_arg_expr), intent(inout) :: from
+    !> Target node to move allocation to
+    type(lox_arg_expr), intent(out) :: to
+
+    call move_alloc(from%expr, to%expr)
+  end subroutine move_arg_expr
 
 end module flox_ast

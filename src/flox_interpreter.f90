@@ -4,13 +4,14 @@
 module flox_interpreter
   use, intrinsic :: iso_fortran_env, only : lox_real => real64, output_unit
   use flox_ast, only : lox_visitor, lox_expr, lox_ast, &
-    & lox_block, lox_expr_stmt, lox_print, lox_var, &
-    & lox_assign, lox_binary, lox_grouping, lox_literal, lox_unary
+    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, lox_unary, lox_call
   use flox_diagnostic, only : lox_diagnostic, label_type, level_runtime_error
-  use flox_environment, only : lox_environment, lox_object, lox_error
+  use flox_environment, only : lox_environment, lox_scope, lox_object, lox_error
   use flox_scanner, only : lox_token, line_descriptor, MINUS, BANG, STAR, SLASH, PLUS, &
     & GREATER, GREATER_EQUAL, LESS, LESS_EQUAL, EQUAL_EQUAL, BANG_EQUAL, &
     & IDENTIFIER, STRING, NUMBER
+  use stdlib_strings, only : to_string
   implicit none
   private
 
@@ -28,6 +29,12 @@ module flox_interpreter
     character(len=:), allocatable :: value
   end type lox_string
 
+  type, extends(lox_object), abstract :: lox_callable
+  contains
+    procedure(arity), deferred :: arity
+    procedure(call), deferred :: call
+  end type lox_callable
+
   interface lox_string
     module procedure :: new_string
   end interface lox_string
@@ -40,20 +47,25 @@ module flox_interpreter
     procedure :: evaluate
     procedure :: visit_ast
     procedure :: visit_assign
+    procedure :: visit_logical
     procedure :: visit_binary
     procedure :: visit_grouping
     procedure :: visit_literal
     procedure :: visit_unary
+    procedure :: visit_call
     procedure :: visit_block
     procedure :: visit_expr_stmt
     procedure :: visit_print
     procedure :: visit_var
+    procedure :: visit_if
+    procedure :: visit_while
   end type lox_interpreter
 
-  interface to_string
+  interface stringify
+    module procedure :: stringify
     module procedure :: logical_to_string
     module procedure :: real_to_string
-  end interface to_string
+  end interface stringify
 
   abstract interface
     pure function compare_interface(left, right) result(res)
@@ -62,6 +74,43 @@ module flox_interpreter
       type(lox_boolean) :: res
     end function compare_interface
   end interface
+
+  abstract interface
+    function arity(self)
+      import :: lox_callable
+      class(lox_callable), intent(in) :: self
+      integer :: arity
+    end function arity
+
+    subroutine call(self, interpreter, args)
+      import :: lox_callable, lox_interpreter, lox_scope
+      class(lox_callable), intent(in) :: self
+      class(lox_interpreter), intent(inout) :: interpreter
+      class(lox_scope), intent(inout) :: args
+    end subroutine call
+  end interface
+
+
+  type, extends(lox_callable) :: lox_builtin
+    integer :: narg = 0
+    procedure(builtin), pointer, nopass :: impl => null()
+  contains
+    procedure :: arity => arity_builtin
+    procedure :: call => call_builtin
+  end type lox_builtin
+
+  interface lox_builtin
+    module procedure :: new_builtin
+  end interface lox_builtin
+
+  abstract interface
+    subroutine builtin(self, args)
+      import :: lox_interpreter, lox_scope
+      class(lox_interpreter), intent(inout) :: self
+      class(lox_scope), intent(inout) :: args
+    end subroutine builtin
+  end interface
+
 
 contains
 
@@ -72,7 +121,10 @@ contains
     integer :: istmt
 
     ! Initialize the global scope
-    if (self%env%current == 0) call self%env%push
+    if (self%env%current == 0) then
+      call self%env%push
+      call add_builtin(self)
+    end if
 
     do istmt = 1, ast%nstmt
       associate(entry => ast%stmts(istmt)%stmt)
@@ -91,6 +143,23 @@ contains
     call self%env%assign(expr%name, self%local)
     call handle_error(self, expr)
   end subroutine visit_assign
+
+  recursive subroutine visit_logical(self, expr)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_logical), intent(in) :: expr
+
+    type(lox_boolean) :: left
+
+    call self%evaluate(expr%left)
+    call handle_error(self, expr)
+
+    left = cast_boolean(self%local)
+    if (expr%operator%val == "or" .and. left%value) return
+    if (expr%operator%val == "and" .and. .not.left%value) return
+
+    call self%evaluate(expr%right)
+    call handle_error(self, expr)
+  end subroutine visit_logical
 
   recursive subroutine visit_binary(self, expr)
     class(lox_interpreter), intent(inout) :: self
@@ -148,15 +217,7 @@ contains
     if (allocated(expr%object)) then
       select case(expr%object%ttype)
       case(IDENTIFIER)
-        select case(expr%object%val)
-        case("nil")
-        case("true")
-          self%local = lox_boolean(.true.)
-        case("false")
-          self%local = lox_boolean(.false.)
-        case default
-          call self%env%get(expr%object, self%local)
-        end select
+        call self%env%get(expr%object, self%local)
 
       case(NUMBER)
         block
@@ -203,6 +264,46 @@ contains
     call handle_error(self, expr)
   end subroutine visit_unary
 
+  recursive subroutine visit_call(self, expr)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_call), intent(in) :: expr
+
+    class(lox_object), allocatable :: callee
+    class(lox_callable), allocatable :: func
+    type(lox_scope) :: scope
+    integer :: iarg
+
+    call self%evaluate(expr%callee)
+    call handle_error(self, expr)
+    call move_alloc(self%local, callee)
+
+    do iarg = 1, expr%narg
+      associate(arg => expr%args(iarg)%expr)
+        call self%evaluate(arg)
+        call handle_error(self, arg)
+        call scope%define(new_identifier("$"//to_string(iarg)), self%local)
+        call handle_error(self, arg)
+      end associate
+    end do
+
+    func = cast_callable(callee)
+    if (.not.allocated(func)) then
+      self%local = lox_error("Can only call functions and classes.")
+      call handle_error(self, expr)
+      return
+    end if
+
+    if (expr%narg /= func%arity()) then
+      self%local = lox_error("Expected "//to_string(func%arity())//" arguments but got "//&
+        & to_string(expr%narg))
+      call handle_error(self, expr)
+      return
+    end if
+
+    call func%call(self, scope)
+
+  end subroutine visit_call
+
   recursive subroutine visit_block(self, stmt)
     class(lox_interpreter), intent(inout) :: self
     class(lox_block), intent(in) :: stmt
@@ -241,13 +342,50 @@ contains
     class(lox_var), intent(in) :: stmt
 
     class(lox_object), allocatable :: object
+    class(lox_expr), allocatable :: expr
 
+    expr = lox_literal(stmt%name)
+    if (allocated(self%local)) deallocate(self%local)
     if (allocated(stmt%expression)) then
       call self%evaluate(stmt%expression)
-      call move_alloc(self%local, object)
     end if
-    call self%env%define(stmt%name, object)
+    call self%env%define(stmt%name, self%local)
+    call handle_error(self, expr)
+    if (allocated(self%local)) deallocate(self%local)
   end subroutine visit_var
+
+  recursive subroutine visit_if(self, stmt)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_if), intent(in) :: stmt
+
+    class(lox_boolean), allocatable :: condition
+
+    call self%evaluate(stmt%condition)
+    condition = cast_boolean(self%local)
+    if (allocated(self%local)) deallocate(self%local)
+
+    if (condition%value) then
+      call stmt%then_branch%accept(self)
+    else if (allocated(stmt%else_branch)) then
+      call stmt%else_branch%accept(self)
+    end if
+  end subroutine visit_if
+
+  recursive subroutine visit_while(self, stmt)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_while), intent(in) :: stmt
+
+    class(lox_boolean), allocatable :: condition
+
+    while_loop: do
+      call self%evaluate(stmt%condition)
+      condition = cast_boolean(self%local)
+      if (allocated(self%local)) deallocate(self%local)
+      if (.not.condition%value) exit while_loop
+
+      call stmt%body%accept(self)
+    end do while_loop
+  end subroutine visit_while
 
 
   subroutine handle_error(self, expr)
@@ -278,7 +416,7 @@ contains
 
   pure function cast_boolean(object) result(res)
     class(lox_object), intent(in), optional :: object
-    class(lox_object), allocatable :: res
+    type(lox_boolean), allocatable :: res
 
     if (present(object)) then
       select type(object)
@@ -291,6 +429,16 @@ contains
       res = lox_boolean(.false.)
     end if
   end function cast_boolean
+
+  pure function cast_callable(object) result(res)
+    class(lox_object), intent(in), optional :: object
+    class(lox_callable), allocatable :: res
+
+    select type(object)
+    class is(lox_callable)
+      res = object
+    end select
+  end function cast_callable
 
   pure function op_negate(object) result(res)
     class(lox_object), intent(in), optional :: object
@@ -556,13 +704,15 @@ contains
     if (present(object)) then
       select type(object)
       type is(lox_boolean)
-        string = to_string(object%value)
+        string = stringify(object%value)
       type is(lox_number)
-        string = to_string(object%value)
+        string = stringify(object%value)
       type is(lox_string)
         string = object%value
       type is(lox_error)
         string = "error("//object%message//")"
+      type is(lox_builtin)
+        string = "<builtin>"
       class default
         string = "unknown"
       end select
@@ -578,13 +728,15 @@ contains
     if (present(object)) then
       select type(object)
       type is(lox_boolean)
-        string = "boolean("//to_string(object%value)//")"
+        string = "boolean("//stringify(object%value)//")"
       type is(lox_number)
-        string = "number("//to_string(object%value)//")"
+        string = "number("//stringify(object%value)//")"
       type is(lox_string)
         string = "string("""//object%value//""")"
       type is(lox_error)
         string = "error("//object%message//")"
+      type is(lox_builtin)
+        string = "function(<builtin>)"
       class default
         string = "unknown"
       end select
@@ -631,5 +783,88 @@ contains
       string = "false"
     end if
   end function logical_to_string
+
+
+  module subroutine add_builtin(self)
+    class(lox_interpreter), intent(inout) :: self
+
+    class(lox_object), allocatable :: builtin
+    type(lox_token) :: id
+
+    id = new_identifier("nil")
+    call self%env%define(id, builtin)
+    call self%env%freeze(id, builtin)
+
+    id = new_identifier("true")
+    builtin = lox_boolean(.true.)
+    call self%env%define(id, builtin)
+    call self%env%freeze(id, builtin)
+
+    id = new_identifier("false")
+    builtin = lox_boolean(.false.)
+    call self%env%define(id, builtin)
+    call self%env%freeze(id, builtin)
+
+    id = new_identifier("clock")
+    builtin = lox_builtin(0, builtin_clock)
+    call self%env%define(id, builtin)
+    call self%env%freeze(id, builtin)
+
+    id = new_identifier("print")
+    builtin = lox_builtin(1, builtin_print)
+    call self%env%define(id, builtin)
+    call self%env%freeze(id, builtin)
+  end subroutine add_builtin
+
+  subroutine builtin_clock(self, args)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_scope), intent(inout) :: args
+
+    integer, parameter :: i8 = selected_int_kind(18)
+    integer(i8) :: time_count, time_rate, time_max
+
+    call system_clock(time_count, time_rate, time_max)
+    self%local = lox_number(real(time_count, lox_real)/real(time_rate, lox_real))
+  end subroutine builtin_clock
+
+  subroutine builtin_print(self, args)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_scope), intent(inout) :: args
+
+    call args%get(new_identifier("$1"), self%local)
+    write(output_unit, '(a)') stringify(self%local)
+    if (allocated(self%local)) deallocate(self%local)
+  end subroutine builtin_print
+
+  function new_identifier(name) result(token)
+    character(len=*), intent(in) :: name
+    type(lox_token) :: token
+
+    token = lox_token(1, 0, IDENTIFIER, name)
+  end function new_identifier
+
+  function new_builtin(narg, impl) result(object)
+    integer, intent(in) :: narg
+    procedure(builtin) :: impl
+    type(lox_builtin) :: object
+
+    object%narg = narg
+    object%impl => impl
+  end function new_builtin
+
+  function arity_builtin(self) result(narg)
+    class(lox_builtin), intent(in) :: self
+    integer :: narg
+
+    narg = self%narg
+  end function arity_builtin
+
+  subroutine call_builtin(self, interpreter, args)
+    class(lox_builtin), intent(in) :: self
+    class(lox_interpreter), intent(inout) :: interpreter
+    class(lox_scope), intent(inout) :: args
+
+    call self%impl(interpreter, args)
+  end subroutine call_builtin
 
 end module flox_interpreter

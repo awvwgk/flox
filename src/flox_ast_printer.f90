@@ -3,8 +3,8 @@
 
 module flox_ast_printer
   use flox_ast, only : lox_visitor, lox_expr, lox_ast, &
-    & lox_block, lox_expr_stmt, lox_print, lox_var, &
-    & lox_assign, lox_binary, lox_grouping, lox_literal, lox_unary
+    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, lox_unary, lox_call
   implicit none
   private
 
@@ -15,14 +15,18 @@ module flox_ast_printer
   contains
     procedure :: visit_ast
     procedure :: visit_assign
+    procedure :: visit_logical
     procedure :: visit_binary
     procedure :: visit_grouping
     procedure :: visit_literal
     procedure :: visit_unary
+    procedure :: visit_call
     procedure :: visit_block
     procedure :: visit_expr_stmt
     procedure :: visit_print
     procedure :: visit_var
+    procedure :: visit_if
+    procedure :: visit_while
   end type lox_ast_printer
 
 contains
@@ -33,6 +37,13 @@ contains
 
     call parenthesize(self, "= "//expr%name%val, expr%value)
   end subroutine visit_assign
+
+  recursive subroutine visit_logical(self, expr)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_logical), intent(in) :: expr
+
+    call parenthesize(self, expr%operator%val, expr%left, expr%right)
+  end subroutine visit_logical
 
   recursive subroutine visit_binary(self, expr)
     class(lox_ast_printer), intent(inout) :: self
@@ -61,6 +72,23 @@ contains
 
     call parenthesize(self, expr%operator%val, expr%right)
   end subroutine visit_unary
+
+  recursive subroutine visit_call(self, expr)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_call), intent(in) :: expr
+
+    integer :: iarg
+
+    self%string = self%string // "(call "
+    call expr%callee%accept(self)
+    do iarg = 1, expr%narg
+      self%string = self%string // " "
+      associate(arg => expr%args(iarg)%expr)
+        call arg%accept(self)
+      end associate
+    end do
+    self%string = self%string // ")"
+  end subroutine visit_call
 
   recursive subroutine visit_ast(self, ast)
     class(lox_ast_printer), intent(inout) :: self
@@ -118,6 +146,32 @@ contains
       self%string = self%string // "(var " // stmt%name%val // ")"
     end if
   end subroutine visit_var
+
+  recursive subroutine visit_if(self, stmt)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_if), intent(in) :: stmt
+
+    self%string = self%string // "(if "
+    call parenthesize(self, "condition", stmt%condition)
+    self%string = self%string // " "
+    call stmt%then_branch%accept(self)
+    if (allocated(stmt%else_branch)) then
+      self%string = self%string // " "
+      call stmt%else_branch%accept(self)
+    end if
+    self%string = self%string // ")"
+  end subroutine visit_if
+
+  recursive subroutine visit_while(self, stmt)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_while), intent(in) :: stmt
+
+    self%string = self%string // "(while "
+    call parenthesize(self, "condition", stmt%condition)
+    self%string = self%string // " "
+    call stmt%body%accept(self)
+    self%string = self%string // ")"
+  end subroutine visit_while
 
   recursive subroutine parenthesize(self, name, expr1, expr2)
     class(lox_ast_printer), intent(inout) :: self
