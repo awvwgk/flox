@@ -33,7 +33,8 @@ module flox_diagnostic
     level_error = level_enum(0), &
     level_syntax_error = level_enum(1), &
     level_eof_error = level_enum(2), &
-    level_runtime_error = level_enum(3), &
+    level_semantic_error = level_enum(3), &
+    level_runtime_error = level_enum(4), &
     level_warning = level_enum(10), &
     level_help = level_enum(20), &
     level_note = level_enum(30), &
@@ -202,6 +203,8 @@ contains
       string = color%bold_red // "error" // color%reset
     case(level_syntax_error%id, level_eof_error%id)
       string = color%bold_red // "syntax error" // color%reset
+    case(level_semantic_error%id)
+      string = color%bold_red // "semantic error" // color%reset
     case(level_runtime_error%id)
       string = color%bold_red // "runtime error" // color%reset
     case(level_warning%id)
@@ -389,7 +392,8 @@ contains
     character(len=:), allocatable :: this_color
 
     select case(level%id)
-    case(level_error%id, level_syntax_error%id, level_eof_error%id, level_runtime_error%id)
+    case(level_error%id, level_syntax_error%id, level_eof_error%id, &
+        & level_semantic_error%id, level_runtime_error%id)
       this_color = color%bold_red
     case(level_warning%id)
       this_color = color%bold_yellow

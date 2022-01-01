@@ -4,10 +4,11 @@
 module flox_interpreter
   use, intrinsic :: iso_fortran_env, only : lox_real => real64, output_unit
   use flox_ast, only : lox_visitor, lox_expr, lox_ast, &
-    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, lox_fun, lox_return, &
     & lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, lox_unary, lox_call
   use flox_diagnostic, only : lox_diagnostic, label_type, level_runtime_error
   use flox_environment, only : lox_environment, lox_scope, lox_object, lox_error
+  use flox_map, only : map_type => cuckoo_hash, new_map => new_cuckoo_hash, container_type
   use flox_scanner, only : lox_token, line_descriptor, MINUS, BANG, STAR, SLASH, PLUS, &
     & GREATER, GREATER_EQUAL, LESS, LESS_EQUAL, EQUAL_EQUAL, BANG_EQUAL, &
     & IDENTIFIER, STRING, NUMBER
@@ -15,7 +16,8 @@ module flox_interpreter
   implicit none
   private
 
-  public :: lox_interpreter, lox_object, repr
+  public :: lox_interpreter, new_interpreter
+  public :: lox_object, repr
 
   type, extends(lox_object) :: lox_boolean
     logical :: value
@@ -43,8 +45,11 @@ module flox_interpreter
     type(lox_diagnostic), allocatable :: diag(:)
     class(lox_object), allocatable :: local
     type(lox_environment) :: env
+    logical :: return = .false.
+    type(map_type) :: locals
   contains
     procedure :: evaluate
+    procedure :: resolve
     procedure :: visit_ast
     procedure :: visit_assign
     procedure :: visit_logical
@@ -59,6 +64,8 @@ module flox_interpreter
     procedure :: visit_var
     procedure :: visit_if
     procedure :: visit_while
+    procedure :: visit_fun
+    procedure :: visit_return
   end type lox_interpreter
 
   interface stringify
@@ -111,8 +118,27 @@ module flox_interpreter
     end subroutine builtin
   end interface
 
+  type, extends(lox_callable) :: lox_function
+    class(lox_fun), allocatable :: decl
+    integer :: closure
+  contains
+    procedure :: arity => arity_function
+    procedure :: call => call_function
+  end type lox_function
+
+
+  interface int
+    module procedure :: cont_to_int
+  end interface int
+
 
 contains
+
+  subroutine new_interpreter(self)
+    type(lox_interpreter), intent(out) :: self
+
+    call new_map(self%locals)
+  end subroutine new_interpreter
 
   recursive subroutine visit_ast(self, ast)
     class(lox_interpreter), intent(inout) :: self
@@ -140,8 +166,18 @@ contains
     call self%evaluate(expr%value)
     call handle_error(self, expr)
 
-    call self%env%assign(expr%name, self%local)
-    call handle_error(self, expr)
+    block
+      type(container_type), pointer :: ptr
+      integer :: iscope
+      call self%locals%get(to_string(expr%id), ptr)
+      if (associated(ptr)) then
+        iscope = get_env(self%env, int(ptr))
+        call self%env%scopes(iscope)%assign(expr%name, self%local)
+      else
+        call self%env%scopes(1)%assign(expr%name, self%local)
+      end if
+      call handle_error(self, expr)
+    end block
   end subroutine visit_assign
 
   recursive subroutine visit_logical(self, expr)
@@ -217,7 +253,17 @@ contains
     if (allocated(expr%object)) then
       select case(expr%object%ttype)
       case(IDENTIFIER)
-        call self%env%get(expr%object, self%local)
+        block
+          type(container_type), pointer :: ptr
+          integer :: iscope
+          call self%locals%get(to_string(expr%id), ptr)
+          if (associated(ptr)) then
+            iscope = get_env(self%env, int(ptr))
+            call self%env%scopes(iscope)%get(expr%object, self%local)
+          else
+            call self%env%scopes(1)%get(expr%object, self%local)
+          end if
+        end block
 
       case(NUMBER)
         block
@@ -311,11 +357,12 @@ contains
     integer :: istmt
 
     call self%env%push
-    do istmt = 1, stmt%nstmt
+    blck_stmt: do istmt = 1, stmt%nstmt
       associate(entry => stmt%stmts(istmt)%stmt)
         call entry%accept(self)
+        if (self%return) exit blck_stmt
       end associate
-    end do
+    end do blck_stmt
     call self%env%pop
   end subroutine visit_block
 
@@ -344,12 +391,14 @@ contains
     class(lox_object), allocatable :: object
     class(lox_expr), allocatable :: expr
 
-    expr = lox_literal(stmt%name)
+    expr = lox_literal(-1, stmt%name)
     if (allocated(self%local)) deallocate(self%local)
     if (allocated(stmt%expression)) then
       call self%evaluate(stmt%expression)
     end if
-    call self%env%define(stmt%name, self%local)
+    associate(scope => self%env%scopes(self%env%current))
+      call scope%define(stmt%name, self%local)
+    end associate
     call handle_error(self, expr)
     if (allocated(self%local)) deallocate(self%local)
   end subroutine visit_var
@@ -384,8 +433,35 @@ contains
       if (.not.condition%value) exit while_loop
 
       call stmt%body%accept(self)
+      if (self%return) exit while_loop
     end do while_loop
   end subroutine visit_while
+
+  recursive subroutine visit_fun(self, stmt)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_fun), intent(in) :: stmt
+
+    class(lox_object), allocatable :: object
+    integer :: closure
+
+    closure = self%env%current
+    object = lox_function(stmt, closure)
+    associate(scope => self%env%scopes(closure))
+      scope%ref = scope%ref + 1
+      call scope%define(stmt%name, object)
+    end associate
+  end subroutine visit_fun
+
+  recursive subroutine visit_return(self, stmt)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_return), intent(in) :: stmt
+
+    if (allocated(self%local)) deallocate(self%local)
+    if (allocated(stmt%expression)) then
+      call self%evaluate(stmt%expression)
+    end if
+    self%return = .true.
+  end subroutine visit_return
 
 
   subroutine handle_error(self, expr)
@@ -593,7 +669,7 @@ contains
       type(lox_number), intent(in) :: left, right
       type(lox_boolean) :: res
 
-      res = lox_boolean(left%value < right%value)
+      res = lox_boolean(left%value <= right%value)
     end function le
   end function op_le
 
@@ -709,6 +785,8 @@ contains
         string = stringify(object%value)
       type is(lox_string)
         string = object%value
+      type is(lox_function)
+        string = "<fun "//object%decl%name%val//">"
       type is(lox_error)
         string = "error("//object%message//")"
       type is(lox_builtin)
@@ -735,6 +813,8 @@ contains
         string = "string("""//object%value//""")"
       type is(lox_error)
         string = "error("//object%message//")"
+      type is(lox_function)
+        string = "function(<"//object%decl%name%val//">)"
       type is(lox_builtin)
         string = "function(<builtin>)"
       class default
@@ -744,6 +824,17 @@ contains
       string = "nil"
     end if
   end function repr
+
+  subroutine resolve(self, expr, distance)
+    class(lox_interpreter), intent(inout) :: self
+    class(lox_expr), intent(in) :: expr
+    integer, intent(in) :: distance
+
+    type(container_type), pointer :: ptr
+
+    call self%locals%insert(to_string(expr%id), ptr)
+    ptr%val = distance
+  end subroutine resolve
 
   recursive subroutine evaluate(self, expr)
     class(lox_interpreter), intent(inout) :: self
@@ -791,29 +882,31 @@ contains
     class(lox_object), allocatable :: builtin
     type(lox_token) :: id
 
-    id = new_identifier("nil")
-    call self%env%define(id, builtin)
-    call self%env%freeze(id, builtin)
+    associate(scope => self%env%scopes(self%env%current))
+      id = new_identifier("nil")
+      call scope%define(id, builtin)
+      call scope%freeze(id, builtin)
 
-    id = new_identifier("true")
-    builtin = lox_boolean(.true.)
-    call self%env%define(id, builtin)
-    call self%env%freeze(id, builtin)
+      id = new_identifier("true")
+      builtin = lox_boolean(.true.)
+      call scope%define(id, builtin)
+      call scope%freeze(id, builtin)
 
-    id = new_identifier("false")
-    builtin = lox_boolean(.false.)
-    call self%env%define(id, builtin)
-    call self%env%freeze(id, builtin)
+      id = new_identifier("false")
+      builtin = lox_boolean(.false.)
+      call scope%define(id, builtin)
+      call scope%freeze(id, builtin)
 
-    id = new_identifier("clock")
-    builtin = lox_builtin(0, builtin_clock)
-    call self%env%define(id, builtin)
-    call self%env%freeze(id, builtin)
+      id = new_identifier("clock")
+      builtin = lox_builtin(0, builtin_clock)
+      call scope%define(id, builtin)
+      call scope%freeze(id, builtin)
 
-    id = new_identifier("print")
-    builtin = lox_builtin(1, builtin_print)
-    call self%env%define(id, builtin)
-    call self%env%freeze(id, builtin)
+      id = new_identifier("print")
+      builtin = lox_builtin(1, builtin_print)
+      call scope%define(id, builtin)
+      call scope%freeze(id, builtin)
+    end associate
   end subroutine add_builtin
 
   subroutine builtin_clock(self, args)
@@ -866,5 +959,60 @@ contains
 
     call self%impl(interpreter, args)
   end subroutine call_builtin
+
+  function arity_function(self) result(narg)
+    class(lox_function), intent(in) :: self
+    integer :: narg
+
+    narg = size(self%decl%params)
+  end function arity_function
+
+  subroutine call_function(self, interpreter, args)
+    class(lox_function), intent(in) :: self
+    class(lox_interpreter), intent(inout) :: interpreter
+    class(lox_scope), intent(inout) :: args
+
+    call interpreter%env%push(self%closure)
+    fun_body: block
+      class(lox_object), allocatable :: object
+      type(lox_token) :: id
+      integer :: iarg
+
+      associate(scope => interpreter%env%scopes(interpreter%env%current))
+        do iarg = 1, size(self%decl%params)
+          call args%get(new_identifier("$"//to_string(iarg)), object)
+          call scope%define(self%decl%params(iarg), object)
+        end do
+      end associate
+
+      call self%decl%body%accept(interpreter)
+      if (interpreter%return) interpreter%return = .false.
+    end block fun_body
+    call interpreter%env%pop
+  end subroutine call_function
+
+  pure function cont_to_int(ptr) result(res)
+    type(container_type), intent(in) :: ptr
+    integer :: res
+
+    res = 0
+    select type(val => ptr%val)
+    type is(integer)
+      res = val
+    end select
+  end function cont_to_int
+
+  pure function get_env(env, distance) result(res)
+    type(lox_environment), intent(in) :: env
+    integer, intent(in) :: distance
+    integer :: res
+
+    integer :: iscope
+
+    res = env%current
+    do iscope = 1, distance
+      res = env%scopes(res)%parent
+    end do
+  end function get_env
 
 end module flox_interpreter

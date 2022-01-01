@@ -167,6 +167,33 @@ Loop constructs are supported by `while` and `for` statements.
 4.0000000000000000
 ```
 
+Functions are declared using the `fun` keyword and are first-class objects in lox as well as allowing the use of closures.
+All arguments are passed by value, return values are either created explicitly with a `return` statement or implicitly as the result of the last statement (most statements result in `nil`).
+
+```
+1> fun a() {
+..   print 1;
+.. }
+2> a();
+1.0000000000000000
+3> fun make_counter() {
+..   var i = 0;
+..   fun count() {
+..     i = i + 1;
+..     return i;
+..   }
+..
+..   return count;
+.. }
+4> make_counter();
+=> function(<count>)
+5> var counter = make_counter();
+6> counter();
+=> number(1.0000000000000000)
+7> counter();
+=> number(2.0000000000000000)
+```
+
 
 ## License
 

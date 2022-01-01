@@ -9,7 +9,8 @@ module flox
   use flox_diagnostic, only : lox_diagnostic, render, level_eof_error, operator(==)
   use flox_ast, only : lox_ast
   use flox_ast_printer, only : lox_ast_printer
-  use flox_interpreter, only : lox_interpreter, lox_object, repr
+  use flox_interpreter, only : lox_interpreter, new_interpreter, lox_object, repr
+  use flox_resolver, only : lox_resolver, new_resolver
   use flox_parser, only : lox_parser
   use flox_scanner, only : lox_scanner, lox_token, check_token
   use flox_terminal, only : lox_terminal
@@ -20,6 +21,8 @@ module flox
   public :: run_file, run_prompt
 
   type :: lox
+    type(lox_parser) :: parser
+    type(lox_resolver) :: resolver
     type(lox_interpreter) :: interpreter
     type(lox_timer) :: timer
     integer :: verbosity = 2
@@ -28,6 +31,13 @@ module flox
   end type lox
 
 contains
+
+  subroutine new(self)
+    type(lox), intent(out) :: self
+
+    call new_interpreter(self%interpreter)
+    call new_resolver(self%resolver, self%interpreter)
+  end subroutine new
 
   !> Entry point for running a lox script from a file
   subroutine run_file(filename, terminal)
@@ -40,6 +50,8 @@ contains
     type(lox_diagnostic), allocatable :: diagnostic(:)
     class(lox_object), allocatable :: object
     type(lox) :: instance
+
+    call new(instance)
 
     call read_file(filename, input)
     call instance%run(input, object, diagnostic)
@@ -57,6 +69,7 @@ contains
     integer :: stat, line, i
     logical :: more
 
+    call new(instance)
     call instance%timer%push("total")
 
     more = .false.
@@ -106,7 +119,7 @@ contains
       integer :: it
       real(tp) :: ttime, rtime, stime
       character(len=*), parameter :: label(*) = [character(len=20):: &
-        & "scan", "parse", "interpret"]
+        & "scan", "parse", "resolve", "interpret"]
       if (instance%verbosity > 0) then
         ttime = instance%timer%get("total")
         rtime = instance%timer%get("run")
@@ -140,7 +153,6 @@ contains
     type(lox_diagnostic), allocatable, intent(out) :: diagnostic(:)
 
     type(lox_scanner) :: scanner
-    type(lox_parser) :: parser
     type(lox_ast) :: ast
     type(lox_token), allocatable :: tokens(:)
     integer :: i
@@ -150,13 +162,15 @@ contains
     call scanner%scan_tokens(source, tokens)
     call self%timer%pop
 
-    call self%timer%push("parse")
-    call parser%parse(tokens, ast)
-    call self%timer%pop
-    if (allocated(parser%diag)) then
-      call move_alloc(parser%diag, diagnostic)
-      return
-    end if
+    associate(parser => self%parser)
+      call self%timer%push("parse")
+      call parser%parse(tokens, ast)
+      call self%timer%pop
+      if (allocated(parser%diag)) then
+        call move_alloc(parser%diag, diagnostic)
+        return
+      end if
+    end associate
 
     if (self%verbosity > 1) then
       block
@@ -166,17 +180,29 @@ contains
       end block
     end if
 
-    call self%timer%push("interpret")
-    call ast%accept(self%interpreter)
-    call self%timer%pop
-    if (allocated(self%interpreter%diag)) then
-      call move_alloc(self%interpreter%diag, diagnostic)
-      return
-    end if
+    associate(resolver => self%resolver)
+      call self%timer%push("resolve")
+      call ast%accept(resolver)
+      call self%timer%pop
+      if (allocated(resolver%diag)) then
+        call move_alloc(resolver%diag, diagnostic)
+        return
+      end if
+    end associate
 
-    if (allocated(self%interpreter%local)) then
-      object = self%interpreter%local
-    end if
+    associate(interpreter => self%interpreter)
+      call self%timer%push("interpret")
+      call ast%accept(interpreter)
+      call self%timer%pop
+      if (allocated(interpreter%diag)) then
+        call move_alloc(interpreter%diag, diagnostic)
+        return
+      end if
+
+      if (allocated(interpreter%local)) then
+        object = interpreter%local
+      end if
+    end associate
   end subroutine run
 
   !> Reads a whole file into a character string

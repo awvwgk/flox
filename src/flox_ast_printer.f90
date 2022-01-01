@@ -3,7 +3,7 @@
 
 module flox_ast_printer
   use flox_ast, only : lox_visitor, lox_expr, lox_ast, &
-    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, lox_fun, lox_return, &
     & lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, lox_unary, lox_call
   implicit none
   private
@@ -27,6 +27,8 @@ module flox_ast_printer
     procedure :: visit_var
     procedure :: visit_if
     procedure :: visit_while
+    procedure :: visit_fun
+    procedure :: visit_return
   end type lox_ast_printer
 
 contains
@@ -172,6 +174,31 @@ contains
     call stmt%body%accept(self)
     self%string = self%string // ")"
   end subroutine visit_while
+
+  recursive subroutine visit_fun(self, stmt)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_fun), intent(in) :: stmt
+
+    integer :: ipar
+
+    self% string = self%string // "(fun " // stmt%name%val // " "
+    do ipar = 1, size(stmt%params)
+      self%string = self%string // stmt%params(ipar)%val // " "
+    end do
+    call stmt%body%accept(self)
+    self%string = self%string // ")"
+  end subroutine visit_fun
+
+  recursive subroutine visit_return(self, stmt)
+    class(lox_ast_printer), intent(inout) :: self
+    class(lox_return), intent(in) :: stmt
+
+    if (allocated(stmt%expression)) then
+      call parenthesize(self, "return", stmt%expression)
+    else
+      self%string = self%string // "(return)"
+    end if
+  end subroutine visit_return
 
   recursive subroutine parenthesize(self, name, expr1, expr2)
     class(lox_ast_printer), intent(inout) :: self

@@ -28,15 +28,12 @@ module flox_environment
   contains
     procedure :: push => push_env
     procedure :: pop => pop_env
-    procedure :: define => define_env
-    procedure :: assign => assign_env
-    procedure :: get => get_env
-    procedure :: freeze => freeze_env
   end type lox_environment
 
   type :: lox_scope
     integer :: parent = 0
     integer :: nobj = 0
+    integer :: ref = 0
     type(lox_entity), allocatable :: objects(:)
   contains
     procedure :: define => define_scope
@@ -149,13 +146,18 @@ contains
     from%nobj = 0
   end subroutine move_scope
 
-  subroutine push_env(self)
+  subroutine push_env(self, closure)
     !> Instance of environment
     class(lox_environment), target, intent(inout) :: self
+    integer, intent(in), optional :: closure
 
     integer :: parent
 
-    parent = self%current
+    if (present(closure)) then
+      parent = closure
+    else
+      parent = self%current
+    end if
     if (.not.allocated(self%scopes)) call resize(self%scopes)
     if (self%nscope >= size(self%scopes)) call resize(self%scopes)
 
@@ -164,6 +166,10 @@ contains
     associate(scope => self%scopes(self%current))
       scope = lox_scope(parent=parent)
       call resize(scope%objects)
+
+      if (parent > 0) then
+        self%scopes(parent)%ref = self%scopes(parent)%ref + 1
+      end if
     end associate
   end subroutine push_env
 
@@ -171,38 +177,24 @@ contains
     !> Instance of environment
     class(lox_environment), target, intent(inout) :: self
 
+    integer :: parent
+
     if (self%current == 0) return
 
     associate(scope => self%scopes(self%current))
       self%current = scope%parent
-      self%nscope = self%nscope - 1
-      scope = lox_scope()
+
+      if (scope%ref <= 0) then
+        self%nscope = self%nscope - 1
+        parent = scope%parent
+        if (parent > 0) then
+          self%scopes(parent)%ref = self%scopes(parent)%ref - 1
+        end if
+        scope = lox_scope()
+      end if
     end associate
+
   end subroutine pop_env
-
-  subroutine define_env(self, var, object)
-    !> Instance of environment
-    class(lox_environment), target, intent(inout) :: self
-    !> Name of the variable
-    type(lox_token), intent(in) :: var
-    !> Object identified by the variable
-    class(lox_object), allocatable, intent(inout) :: object
-
-    integer :: iscope
-    class(lox_object), allocatable :: copy
-
-    iscope = self%current
-    do
-      if (allocated(object)) copy = object
-      associate(scope => self%scopes(iscope))
-        call scope%define(var, copy)
-        iscope = scope%parent
-      end associate
-      if (.not.is_error(copy)) exit
-      if (iscope == 0) exit
-    end do
-    call move_alloc(copy, object)
-  end subroutine define_env
 
   subroutine define_scope(self, var, object)
     !> Instance of environment
@@ -232,32 +224,6 @@ contains
     if (allocated(object)) ptr%obj = object
   end subroutine define_scope
 
-  subroutine assign_env(self, var, object)
-    !> Instance of environment
-    class(lox_environment), target, intent(inout) :: self
-    !> Name of the variable
-    type(lox_token), intent(in) :: var
-    !> Object identified by the variable
-    class(lox_object), allocatable, intent(inout) :: object
-
-    integer :: iscope
-    class(lox_object), allocatable :: copy
-
-    if (.not.allocated(self%scopes)) call resize(self%scopes)
-
-    iscope = self%current
-    do
-      if (allocated(object)) copy = object
-      associate(scope => self%scopes(iscope))
-        call scope%assign(var, copy)
-        iscope = scope%parent
-      end associate
-      if (.not.is_error(copy)) exit
-      if (iscope == 0) exit
-    end do
-    call move_alloc(copy, object)
-  end subroutine assign_env
-
   subroutine assign_scope(self, var, object)
     !> Instance of environment
     class(lox_scope), target, intent(inout) :: self
@@ -283,29 +249,6 @@ contains
     end if
   end subroutine assign_scope
 
-  subroutine get_env(self, var, object)
-    !> Instance of environment
-    class(lox_environment), target, intent(inout) :: self
-    !> Name of the variable
-    type(lox_token), intent(in) :: var
-    !> Object identified by the variable
-    class(lox_object), allocatable, intent(out) :: object
-
-    integer :: iscope
-
-    if (.not.allocated(self%scopes)) call resize(self%scopes)
-
-    iscope = self%current
-    do
-      associate(scope => self%scopes(iscope))
-        call scope%get(var, object)
-        iscope = scope%parent
-      end associate
-      if (.not.is_error(object)) exit
-      if (iscope == 0) exit
-    end do
-  end subroutine get_env
-
   subroutine get_scope(self, var, object)
     !> Instance of environment
     class(lox_scope), target, intent(inout) :: self
@@ -325,29 +268,6 @@ contains
       object = lox_error("Undefined variable '"//var%val//"' referenced")
     end if
   end subroutine get_scope
-
-  subroutine freeze_env(self, var, object)
-    !> Instance of environment
-    class(lox_environment), target, intent(inout) :: self
-    !> Name of the variable
-    type(lox_token), intent(in) :: var
-    !> Object identified by the variable
-    class(lox_object), allocatable, intent(out) :: object
-
-    integer :: iscope
-
-    if (.not.allocated(self%scopes)) call resize(self%scopes)
-
-    iscope = self%current
-    do
-      associate(scope => self%scopes(iscope))
-        call scope%freeze(var, object)
-        iscope = scope%parent
-      end associate
-      if (.not.is_error(object)) exit
-      if (iscope == 0) exit
-    end do
-  end subroutine freeze_env
 
   subroutine freeze_scope(self, var, object)
     !> Instance of environment

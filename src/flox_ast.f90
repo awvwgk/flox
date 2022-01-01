@@ -3,12 +3,14 @@
 
 !> Main module of the Fortran lox interpreter
 module flox_ast
+  use flox_constants, only : i8
   use flox_scanner, only : lox_token
   implicit none
   private
 
   public :: lox_ast
-  public :: lox_stmt, lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while
+  public :: lox_stmt, lox_block, lox_expr_stmt, lox_print, lox_var, lox_if, lox_while, &
+    & lox_fun, lox_return
   public :: lox_expr, lox_assign, lox_logical, lox_binary, lox_grouping, lox_literal, &
     & lox_unary, lox_call
   public :: lox_visitor
@@ -20,7 +22,8 @@ module flox_ast
     generic :: visit => visit_ast, &
       visit_assign, visit_logical, visit_binary, visit_grouping, visit_literal, visit_unary, &
       visit_call, &
-      visit_block, visit_expr_stmt, visit_print, visit_var, visit_if, visit_while
+      visit_block, visit_expr_stmt, visit_print, visit_var, visit_if, visit_while, &
+      visit_fun, visit_return
     procedure(visit_ast), deferred :: visit_ast
     procedure(visit_assign), deferred :: visit_assign
     procedure(visit_logical), deferred :: visit_logical
@@ -35,10 +38,13 @@ module flox_ast
     procedure(visit_var), deferred :: visit_var
     procedure(visit_if), deferred :: visit_if
     procedure(visit_while), deferred :: visit_while
+    procedure(visit_fun), deferred :: visit_fun
+    procedure(visit_return), deferred :: visit_return
   end type lox_visitor
 
   !> Abstract base class for statements
   type, abstract :: lox_stmt
+    integer(i8) :: id
   contains
     !> Accept a visitor
     procedure(accept_stmt), deferred :: accept
@@ -48,6 +54,7 @@ module flox_ast
 
   !> Abstract base class for expressions
   type, abstract :: lox_expr
+    integer(i8) :: id
   contains
     !> Accept a visitor
     procedure(accept_expr), deferred :: accept
@@ -141,6 +148,30 @@ module flox_ast
     !> Accept a visitor
     procedure :: accept => accept_while
   end type lox_while
+
+  !> Representation of a function declaration
+  type, extends(lox_stmt) :: lox_fun
+    !> Function name
+    type(lox_token), allocatable :: name
+    !> Function parameters
+    type(lox_token), allocatable :: params(:)
+    !> Function body
+    class(lox_block), allocatable :: body
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_fun
+  end type lox_fun
+
+  !> Representation of a return statement
+  type, extends(lox_stmt) :: lox_return
+    !> Token representing the return value
+    type(lox_token), allocatable :: keyword
+    !> Expression to evaluate
+    class(lox_expr), allocatable :: expression
+  contains
+    !> Accept a visitor
+    procedure :: accept => accept_return
+  end type lox_return
 
   !> Representation of an assignment expression
   type, extends(lox_expr) :: lox_assign
@@ -355,6 +386,20 @@ module flox_ast
       class(lox_visitor), intent(inout) :: self
       class(lox_while), intent(in) :: stmt
     end subroutine visit_while
+
+    !> Visit a function declaration
+    recursive subroutine visit_fun(self, stmt)
+      import :: lox_fun, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_fun), intent(in) :: stmt
+    end subroutine visit_fun
+
+    !> Visit a return statement
+    recursive subroutine visit_return(self, stmt)
+      import :: lox_return, lox_visitor
+      class(lox_visitor), intent(inout) :: self
+      class(lox_return), intent(in) :: stmt
+    end subroutine visit_return
   end interface
 
   interface resize
@@ -452,6 +497,18 @@ contains
     class(lox_visitor), intent(inout) :: visitor
     call visitor%visit(self)
   end subroutine accept_while
+
+  subroutine accept_fun(self, visitor)
+    class(lox_fun), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_fun
+
+  subroutine accept_return(self, visitor)
+    class(lox_return), intent(in) :: self
+    class(lox_visitor), intent(inout) :: visitor
+    call visitor%visit(self)
+  end subroutine accept_return
 
   pure function backtrace_stmt(self) result(token)
     class(lox_stmt), intent(in) :: self
