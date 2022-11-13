@@ -28,11 +28,11 @@ contains
     integer :: iarg, narg
     character(len=:), allocatable :: arg
 
-    iarg = 0
+    iarg = 1
     narg = command_argument_count()
     do while(iarg <= narg)
-      iarg = iarg + 1
       call get_argument(iarg, arg)
+      iarg = iarg + 1
       select case(arg)
       case("--help")
         call printout(report, help_text)
