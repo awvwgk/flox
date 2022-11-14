@@ -30,7 +30,7 @@ contains
 
     iarg = 0
     narg = command_argument_count()
-    do while(iarg <= narg)
+    do while(iarg < narg)
       iarg = iarg + 1
       call get_argument(iarg, arg)
       select case(arg)
